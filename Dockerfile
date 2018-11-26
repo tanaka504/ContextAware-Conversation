@@ -1,4 +1,4 @@
-FROM ubuntu:16.04
+FROM nvidia/cuda:8.0-cudnn5-devel-ubuntu16.04
 MAINTAINER tanaka504 <nishikigi.nlp@gmail.com>
 
 # apt-get
@@ -7,7 +7,7 @@ RUN apt-get -y upgrade
 RUN apt-get -y install git vim curl locales mecab libmecab-dev mecab-ipadic-utf8 make xz-utils file sudo bzip2 wget python3-pip swig
 RUN apt-get -y install libssl-dev libbz2-dev libreadline-dev libsqlite3-dev 
 # install pyenv
-ENV HOME /root
+ENV HOME /home
 RUN git clone https://github.com/yyuu/pyenv.git $HOME/.pyenv
 ENV PYENV_ROOT $HOME/.pyenv
 ENV PATH $PYENV_ROOT/bin:$PATH
@@ -56,6 +56,7 @@ RUN git clone --depth 1 https://github.com/neologd/mecab-ipadic-neologd.git /usr
 /usr/src/mecab-ipadic-neologd/bin/install-mecab-ipadic-neologd -n -y
 RUN mecab -d /usr/local/lib/mecab/dic/mecab-ipadic-neologd/
 
+ADD . /home/DA_conv/
 
 WORKDIR /home/
 CMD ["/bin/bash"]
