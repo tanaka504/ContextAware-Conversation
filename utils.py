@@ -22,13 +22,11 @@ class da_Vocab:
 
         for post, cmnt in zip(self.posts, self.cmnts):
             for token in post:
-                #token = self.modify(token)
                 if token in vocab_count:
                     vocab_count[token] += 1
                 else:
                     vocab_count[token] = 1
             for token in cmnt:
-                #token = self.modify(token)
                 if token in vocab_count:
                     vocab_count[token] += 1
                 else:
@@ -47,11 +45,6 @@ class da_Vocab:
         Y_tensor = [[self.word2id[token] if token in self.word2id else self.word2id['<UNK>'] for token in sentence] for sentence in Y_tensor]
         return X_tensor, Y_tensor
 
-    def modify(self, token):
-        token = re.sub(r'[\(\)\,\;]', '', token)
-        token = token.split('^')[0]
-        return token
-
 class utt_Vocab:
     def __init__(self, config, posts, cmnts):
         self.word2id = None
@@ -62,7 +55,7 @@ class utt_Vocab:
         self.construct()
 
     def construct(self):
-        vocab = {'<UNK>': 0, '<EOS>': 1, '<BOS>': 2, '<PAD>': 3}
+        vocab = {'<UNK>': 0, '<EOS>': 1, '<BOS>': 2, '<UttPAD>': 3, '<ConvPAD>': 4}
         vocab_count = {}
 
         for post, cmnt in zip(self.posts, self.cmnts):

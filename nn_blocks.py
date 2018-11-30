@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 class DAEncoder(nn.Module):
@@ -11,11 +12,11 @@ class DAEncoder(nn.Module):
         self.eh = nn.Linear(da_embed_size, da_hidden)
 
     def forward(self, DA):
-        embedding = F.tanh(self.eh(self.xe(DA)))
+        embedding = torch.tanh(self.eh(self.xe(DA))) # (batch_size, 1) -> (batch_size, 1, hidden_size)
         return embedding
 
-    def initHidden(self, device):
-        return torch.zeros(self.hidden_size).to(device)
+    def initHidden(self, batch_size, device):
+        return torch.zeros(batch_size, self.hidden_size).to(device)
 
 
 class DAContextEncoder(nn.Module):
@@ -25,12 +26,13 @@ class DAContextEncoder(nn.Module):
         self.hh = nn.GRU(da_hidden, da_hidden, batch_first=True)
 
     def forward(self, input_hidden, prev_hidden):
-        output = input_hidden.view(1, 1, -1)
+        output = input_hidden
         output, hidden = self.hh(output, prev_hidden)
         return output, hidden
 
-    def initHidden(self, device):
-        return torch.zeros(1, 1, self.hidden_size).to(device)
+    def initHidden(self, batch_size, device):
+        # h_0 = (num_layers * num_directions, batch_size, hidden_size)
+        return torch.zeros(1, batch_size, self.hidden_size).to(device)
 
 
 class DADecoder(nn.Module):
@@ -45,21 +47,35 @@ class DADecoder(nn.Module):
 
 
 class UtteranceEncoder(nn.Module):
-    def __init__(self, utt_input_size, embed_size, utterance_hidden):
+    def __init__(self, utt_input_size, embed_size, utterance_hidden, padding_idx):
         super(UtteranceEncoder, self).__init__()
         self.hidden_size = utterance_hidden
+        self.padding_idx = padding_idx
         self.xe = nn.Embedding(utt_input_size, embed_size)
         self.eh = nn.Linear(embed_size, utterance_hidden)
         self.hh = nn.GRU(utterance_hidden, utterance_hidden, num_layers=1, batch_first=True)
 
     def forward(self, X, hidden):
-        embedding = F.tanh(self.eh(self.xe(X))).view(1, 1, -1)
-        output = embedding
-        output, hidden = self.hh(output, hidden)
-        return output, hidden
+        lengths = (X != self.padding_idx).sum(dim=1)
+        seq_len, sort_idx = lengths.sort(descending=True)
+        _, unsort_idx = sort_idx.sort(descending=False)
+        # sorting
+        X = F.tanh(self.eh(self.xe(X))) # (batch_size, 1, seq_len, embed_size)
+        sorted_X = X[sort_idx]
+        # padding
+        packed_tensor = pack_padded_sequence(sorted_X, seq_len, batch_first=True)
+        output, hidden = self.hh(packed_tensor, hidden)
+        # unpacking
+        output, _ = pad_packed_sequence(output, batch_first=True)
+        # unsorting
+        output = output[unsort_idx]
+        hidden = hidden[:, unsort_idx]
+        hidden = hidden.transpose(0,1)
 
-    def initHidden(self, device):
-        return torch.zeros(1, 1, self.hidden_size).to(device)
+        return hidden, output
+
+    def initHidden(self, batch_size, device):
+        return torch.zeros(1, batch_size, self.hidden_size).to(device)
 
 
 class UtteranceContextEncoder(nn.Module):
@@ -69,13 +85,9 @@ class UtteranceContextEncoder(nn.Module):
         self.hh = nn.GRU(utterance_hidden_size, utterance_hidden_size, batch_first=True)
 
     def forward(self, input_hidden, prev_hidden):
-        output = input_hidden.view(1, 1, -1)
+        output = input_hidden
         output, hidden = self.hh(output, prev_hidden)
         return output, hidden
 
-    def initHidden(self, device):
-        return torch.zeros(1, 1, self.hidden_size).to(device)
-
-
-
-
+    def initHidden(self, batch_size, device):
+        return torch.zeros(1, batch_size, self.hidden_size).to(device)
