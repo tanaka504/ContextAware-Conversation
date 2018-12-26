@@ -117,7 +117,6 @@ def train(experiment):
         tmp_time = time.time()
         print('Epoch {} start'.format(e+1))
 
-        # TODO: 発話のバッチ処理
         # TODO: 同じターン数でバッチ生成
         indexes = [i for i in range(len(X_train))]
         random.shuffle(indexes)
@@ -164,7 +163,6 @@ def train(experiment):
                 X_tensor = torch.tensor([[X[i]] for X in X_seq]).to(device)
                 Y_tensor = torch.tensor([[Y[i]] for Y in Y_seq]).to(device)
                 if config['use_utt']:
-                    # TODO: fix input tensor
                     max_seq_len = max(len(XU[i]) + 1 for XU in XU_seq)
                     # utterance padding
                     for ci in range(len(XU_seq)):
@@ -222,6 +220,7 @@ def train(experiment):
                     torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_beststate.model'))
                 if config['use_uttcontext']:
                     torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_beststate.model'))
+                _valid_loss = valid_loss
 
 
         if (e + 1) % config['LOGGING_FREQ'] == 0:
