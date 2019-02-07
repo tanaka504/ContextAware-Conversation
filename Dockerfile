@@ -1,11 +1,12 @@
-FROM nvidia/cuda:8.0-cudnn5-devel-ubuntu16.04
+FROM nvidia/cuda:8.0-cudnn6-runtime
 MAINTAINER tanaka504 <nishikigi.nlp@gmail.com>
 
 # apt-get
 RUN apt-get update
 RUN apt-get -y upgrade
 RUN apt-get -y install git vim curl locales mecab libmecab-dev mecab-ipadic-utf8 make xz-utils file sudo bzip2 wget python3-pip swig
-RUN apt-get -y install libssl-dev libbz2-dev libreadline-dev libsqlite3-dev 
+RUN apt-get -y install libssl-dev libbz2-dev libreadline-dev libsqlite3-dev
+
 # install pyenv
 ENV HOME /home
 RUN git clone https://github.com/yyuu/pyenv.git $HOME/.pyenv

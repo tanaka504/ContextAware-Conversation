@@ -16,10 +16,11 @@ parser.add_argument('--gpu', '-g', type=int, default=0, help='input gpu num')
 args = parser.parse_args()
 
 if torch.cuda.is_available():
-    torch.cuda.set_device(args.gpu)
-    device = 'cuda'
+    device = torch.device('cuda:{}'.format(args.gpu))
 else:
     device = 'cpu'
+
+print('Use device: ', device)
 
 def initialize_env(name):
     config = pyhocon.ConfigFactory.parse_file('experiments.conf')[name]
@@ -30,13 +31,13 @@ def initialize_env(name):
     return config
 
 def create_DAdata(config):
-    posts, cmnts, _, _ = create_traindata(config)
-    X_train, Y_train, X_valid, Y_valid, X_test, Y_test = separate_data(posts, cmnts)
-    return X_train, Y_train, X_valid, Y_valid, X_test, Y_test
+    posts, cmnts, _, _, turn = create_traindata(config)
+    X_train, Y_train, X_valid, Y_valid, X_test, Y_test, Tturn, Vturn, Testturn = separate_data(posts, cmnts, turn)
+    return X_train, Y_train, X_valid, Y_valid, X_test, Y_test, Tturn, Vturn, Testturn
 
 def create_Uttdata(config):
-    _, _, posts, cmnts = create_traindata(config)
-    X_train, Y_train, X_valid, Y_valid, X_test, Y_test = separate_data(posts, cmnts)
+    _, _, posts, cmnts, turn = create_traindata(config)
+    X_train, Y_train, X_valid, Y_valid, X_test, Y_test, _, _, _ = separate_data(posts, cmnts, turn)
     return X_train, Y_train, X_valid, Y_valid, X_test, Y_test
 
 def make_batchidx(X):
@@ -51,10 +52,10 @@ def make_batchidx(X):
 def train(experiment):
     print('loading setting "{}"...'.format(experiment))
     config = initialize_env(experiment)
-    X_train, Y_train, X_valid, Y_valid, _, _ = create_DAdata(config)
+    X_train, Y_train, X_valid, Y_valid, _, _, Tturn, Vturn, _ = create_DAdata(config)
     print('Finish create train data...')
     da_vocab = da_Vocab(config, X_train + X_valid, Y_train + Y_valid)
-    if config['use_utt']:
+    if config['use_utt'] or config['use_uttcontext']:
         XU_train, YU_train, XU_valid, YU_valid, _, _ = create_Uttdata(config)
         utt_vocab = utt_Vocab(config, XU_train + XU_valid, YU_train + YU_valid)
     else:
@@ -62,9 +63,15 @@ def train(experiment):
     print('Finish create vocab dic...')
 
     # Tokenize sequences
+    # X_train, Tturn = preprocess(X_train, mode='X')
+    # X_valid, Vturn = preprocess(X_valid, mode='X')
+    # Y_train, _ = preprocess(Y_train, mode='Y')
+    # Y_valid, _ = preprocess(Y_valid, mode='Y')
     X_train, Y_train = da_vocab.tokenize(X_train, Y_train)
     X_valid, Y_valid = da_vocab.tokenize(X_valid, Y_valid)
-    if config['use_utt']:
+    if config['use_utt'] or config['use_uttcontext']:
+        # XU_train, _ = preprocess(XU_train, mode='X')
+        # XU_valid, _ = preprocess(XU_valid, mode='X')
         XU_train, YU_train = utt_vocab.tokenize(XU_train, YU_train)
         XU_valid, YU_valid = utt_vocab.tokenize(XU_valid, YU_valid)
     else:
@@ -86,23 +93,28 @@ def train(experiment):
     print_total_loss = 0
     plot_total_loss = 0
 
-    da_encoder = DAEncoder(da_input_size=len(da_vocab.word2id), da_embed_size=config['DA_EMBED'], da_hidden=config['DA_HIDDEN']).to(device)
+    da_encoder = None
+    da_context = None
+    if config['use_da']:
+        da_encoder = DAEncoder(da_input_size=len(da_vocab.word2id), da_embed_size=config['DA_EMBED'], da_hidden=config['DA_HIDDEN']).to(device)
+        da_context = DAContextEncoder(da_hidden=config['DA_HIDDEN']).to(device)
+        da_encoder_opt = optim.Adam(da_encoder.parameters(), lr=lr)
+        da_context_opt = optim.Adam(da_context.parameters(), lr=lr)
+
     da_decoder = DADecoder(da_input_size=len(da_vocab.word2id), da_embed_size=config['DA_EMBED'], da_hidden=config['DEC_HIDDEN']).to(device)
-    da_context = DAContextEncoder(da_hidden=config['DA_HIDDEN']).to(device)
-    da_encoder_opt = optim.Adam(da_encoder.parameters(), lr=lr)
     da_decoder_opt = optim.Adam(da_decoder.parameters(), lr=lr)
-    da_context_opt = optim.Adam(da_context.parameters(), lr=lr)
 
     utt_encoder = None
     utt_context = None
     utt_decoder = None
-    if config['use_utt']:
+    if config['use_utt'] or config['use_uttcontext']:
         utt_encoder = UtteranceEncoder(utt_input_size=len(utt_vocab.word2id), embed_size=config['UTT_EMBED'], utterance_hidden=config['UTT_HIDDEN'], padding_idx=utt_vocab.word2id['<UttPAD>']).to(device)
         utt_encoder_opt = optim.Adam(utt_encoder.parameters(), lr=lr)
     if config['use_uttcontext']:
-        utt_context = UtteranceContextEncoder(utterance_hidden_size=config['UTT_HIDDEN']).to(device)
+        utt_context = UtteranceContextEncoder(utterance_hidden_size=config['UTT_CONTEXT']).to(device)
         utt_context_opt = optim.Adam(utt_context.parameters(), lr=lr)
-    model = DApredictModel().to(device)
+
+    model = DApredictModel(device).to(device)
     print('Success construct model...')
 
 
@@ -124,12 +136,14 @@ def train(experiment):
         while k < len(indexes):
             # initialize
             step_size = min(batch_size, len(indexes) - k)
-            context_hidden = da_context.initHidden(step_size, device)
+
+            context_hidden = da_context.initHidden(step_size, device) if config['use_da'] else None
             utt_context_hidden = utt_context.initHidden(step_size, device) if config['use_uttcontext'] else None
-            da_context_opt.zero_grad()
-            da_encoder_opt.zero_grad()
+            if config['use_da']:
+                da_context_opt.zero_grad()
+                da_encoder_opt.zero_grad()
             da_decoder_opt.zero_grad()
-            if config['use_utt']:
+            if config['use_utt'] or config['use_uttcontext']:
                 utt_encoder_opt.zero_grad()
             if config['use_uttcontext']:
                 utt_context_opt.zero_grad()
@@ -140,8 +154,9 @@ def train(experiment):
             print('\rConversation {}/{} training...'.format(k + step_size, len(X_train)), end='')
             X_seq = [X_train[seq_idx] for seq_idx in batch_idx]
             Y_seq = [Y_train[seq_idx] for seq_idx in batch_idx]
-            max_conv_len = max(len(s) + 1 for s in X_seq)  # seq_len は DA と UTT で共通
-            if config['use_utt']:
+            turn_seq = [Tturn[seq_idx] for seq_idx in batch_idx]
+            max_conv_len = max(len(s) for s in X_seq)  # seq_len は DA と UTT で共通
+            if config['use_utt'] or config['use_uttcontext']:
                 XU_seq = [XU_train[seq_idx] for seq_idx in batch_idx]
                 YU_seq = [YU_train[seq_idx] for seq_idx in batch_idx]
 
@@ -156,13 +171,19 @@ def train(experiment):
             for ci in range(len(X_seq)):
                 X_seq[ci] = X_seq[ci] + [da_vocab.word2id['<PAD>']] * (max_conv_len - len(X_seq[ci]))
                 Y_seq[ci] = Y_seq[ci] + [da_vocab.word2id['<PAD>']] * (max_conv_len - len(Y_seq[ci]))
+                turn_seq[ci] = turn_seq[ci] + [0] * (max_conv_len - len(turn_seq[ci]))
 
             assert len(X_seq) == len(Y_seq), 'Unexpect sequence length'
+
 
             for i in range(0, max_conv_len):
                 X_tensor = torch.tensor([[X[i]] for X in X_seq]).to(device)
                 Y_tensor = torch.tensor([[Y[i]] for Y in Y_seq]).to(device)
-                if config['use_utt']:
+                if config['turn']:
+                    turn_tensor = torch.tensor([[t[i]] for t in turn_seq]).to(device)
+                else:
+                    turn_tensor = None
+                if config['use_utt'] or config['use_uttcontext']:
                     max_seq_len = max(len(XU[i]) + 1 for XU in XU_seq)
                     # utterance padding
                     for ci in range(len(XU_seq)):
@@ -171,16 +192,18 @@ def train(experiment):
                     XU_tensor = torch.tensor([XU[i] for XU in XU_seq]).to(device)
                     # YU_tensor = torch.tensor([YU[i] for YU in YU_seq]).to(device)
                     YU_tensor = None
+                    
 
                 else:
                     XU_tensor, YU_tensor = None, None
                 # X_tensor = (batch_size, 1)
                 # XU_tensor = (batch_size, 1, seq_len)
 
-                last = True if i == len(X_seq) - 1 else False
+                last = True if i == max_conv_len - 1 else False
     
                 if last:
                     loss, context_hidden, utt_context_hidden = model.forward(X_da=X_tensor, Y_da=Y_tensor, X_utt=XU_tensor, Y_utt=YU_tensor,step_size=step_size, 
+                                                         turn=turn_tensor,
                                                          da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
                                                          da_context_hidden=context_hidden,
                                                          utt_encoder=utt_encoder, utt_decoder=utt_decoder, utt_context=utt_context,
@@ -188,16 +211,21 @@ def train(experiment):
                                                          criterion=criterion, last=last, config=config)
                     print_total_loss += loss
                     plot_total_loss += loss
-                    da_encoder_opt.step()
+
+                    if config['use_da']:
+                        da_encoder_opt.step()
+                        da_context_opt.step()
+
                     da_decoder_opt.step()
-                    da_context_opt.step()
-                    if config['use_utt']:
+
+                    if config['use_utt'] or config['use_uttcontext']:
                         utt_encoder_opt.step()
                     if config['use_uttcontext']:
                         utt_context_opt.step()
 
                 else:
                     context_hidden, utt_context_hidden = model.forward(X_da=X_tensor, Y_da=Y_tensor, X_utt=XU_tensor, Y_utt=YU_tensor, step_size=step_size, 
+                                                   turn=turn_tensor,
                                                    da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
                                                    da_context_hidden=context_hidden,
                                                    utt_encoder=utt_encoder, utt_decoder=utt_decoder, utt_context=utt_context,
@@ -205,18 +233,27 @@ def train(experiment):
                                                    criterion=criterion, last=last, config=config)
             k += step_size
         print()
-        valid_loss = validation(X_valid=X_valid, Y_valid=Y_valid, XU_valid=XU_valid, YU_valid=YU_valid,
+        valid_loss = validation(X_valid=X_valid, Y_valid=Y_valid, XU_valid=XU_valid, YU_valid=YU_valid, turn=Vturn,
                                 model=model, da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
                                 utt_encoder=utt_encoder, utt_context=utt_context, utt_decoder=utt_decoder, config=config)
 
         if _valid_loss is None:
+            if config['use_da']:
+                torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_beststate.model'))
+                torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_beststate.model'))
+            torch.save(da_decoder.state_dict(), os.path.join(config['log_dir'], 'dec_beststate.model'))
+            if config['use_utt'] or config['use_uttcontext']:
+                torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_beststate.model'))
+            if config['use_uttcontext']:
+                torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_beststate.model'))
             _valid_loss = valid_loss
         else:
             if _valid_loss > valid_loss:
-                torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_beststate.model'))
+                if config['use_da']:
+                    torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_beststate.model'))
+                    torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_beststate.model'))
                 torch.save(da_decoder.state_dict(), os.path.join(config['log_dir'], 'dec_beststate.model'))
-                torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_beststate.model'))
-                if config['use_utt']:
+                if config['use_utt'] or config['use_uttcontext']:
                     torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_beststate.model'))
                 if config['use_uttcontext']:
                     torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_beststate.model'))
@@ -233,10 +270,11 @@ def train(experiment):
 
         if (e + 1) % config['SAVE_MODEL'] == 0:
             print('saving model')
-            torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_state{}.model'.format(e + 1)))
+            if config['use_da']:
+                torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_state{}.model'.format(e + 1)))
+                torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_state{}.model'.format(e + 1)))
             torch.save(da_decoder.state_dict(), os.path.join(config['log_dir'], 'dec_state{}.model'.format(e + 1)))
-            torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_state{}.model'.format(e + 1)))
-            if config['use_utt']:
+            if config['use_utt'] or config['use_uttcontext']:
                 torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_state{}.model'.format(e + 1)))
             if config['use_uttcontext']:
                 torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_state{}.model'.format(e + 1)))
@@ -245,11 +283,11 @@ def train(experiment):
     print()
     print('Finish training | exec time: %.4f [sec]' % (time.time() - start))
 
-def validation(X_valid, Y_valid, XU_valid, YU_valid, model,
+def validation(X_valid, Y_valid, XU_valid, YU_valid, model, turn,
                da_encoder, da_decoder, da_context,
                utt_encoder, utt_context, utt_decoder, config):
 
-    da_context_hidden = da_context.initHidden(1, device)
+    da_context_hidden = da_context.initHidden(1, device) if config['use_da'] else None
     utt_context_hidden = utt_context.initHidden(1, device) if config['use_uttcontext'] else None
     criterion = nn.CrossEntropyLoss()
     total_loss = 0
@@ -258,22 +296,28 @@ def validation(X_valid, Y_valid, XU_valid, YU_valid, model,
     for seq_idx in range(len(X_valid)):
         X_seq = X_valid[seq_idx]
         Y_seq = Y_valid[seq_idx]
-        if config['use_utt']:
+        turn_seq = turn[seq_idx]
+        if config['use_utt'] or config['use_uttcontext']:
             XU_seq = XU_valid[seq_idx]
             YU_seq = YU_valid[seq_idx]
 
-        assert len(X_seq) == len(Y_seq), 'Unexpect sequence len in evaluate'
+        assert len(X_seq) == len(Y_seq), 'Unexpect sequence len in evaluate {} != {}'.format(len(X_seq), len(Y_seq))
 
         for i in range(0, len(X_seq)):
             X_tensor = torch.tensor([[X_seq[i]]]).to(device)
             Y_tensor = torch.tensor([[Y_seq[i]]]).to(device)
-            if config['use_utt']:
+            if config['turn']:
+                turn_tensor = torch.tensor([[turn_seq[i]]]).to(device)
+            else:
+                turn_tensor = None
+            if config['use_utt'] or config['use_uttcontext']:
                 XU_tensor = torch.tensor([XU_seq[i]]).to(device)
                 YU_tensor = torch.tensor([YU_seq[i]]).to(device)
             else:
                 XU_tensor, YU_tensor = None, None
 
             loss, context_hidden, utt_context_hidden = model.evaluate(X_da=X_tensor, Y_da=Y_tensor, X_utt=XU_tensor, Y_utt=YU_tensor,
+                                                  turn=turn_tensor,
                                                   da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
                                                   da_context_hidden=da_context_hidden,
                                                   utt_encoder=utt_encoder, utt_decoder=utt_decoder, utt_context=utt_context,
