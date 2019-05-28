@@ -88,7 +88,7 @@ def evaluate(experiment):
             else:
                 turn_tensor = None
             if config['use_utt'] or config['use_uttcontext']:
-                XU_tensor = torch.tensor([[XU_seq[i]]]).to(device)
+                XU_tensor = torch.tensor([XU_seq[i]]).to(device)
             else:
                 XU_tensor = None
 
@@ -157,7 +157,7 @@ if __name__ == '__main__':
     true = [label for line in result for label in line['true']]
     pred = [label for line in result for label in line['pred']]
 
-
+    print(len([label for label in pred if label == da_vocab.word2id['<Statement>']]))
     calc_average(y_true=true, y_pred=pred)
     f = f1_score(y_true=true, y_pred=pred, average=None)
     [print(da_vocab.id2word[idx], score) for idx, score in zip(sorted(set(true)),f)]
