@@ -9,322 +9,164 @@ from utils import *
 from nn_blocks import *
 import argparse
 import random
+import numpy as np
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--expr', '-e', default='DAonly', help='input experiment config')
-parser.add_argument('--gpu', '-g', type=int, default=0, help='input gpu num')
-args = parser.parse_args()
-
-if torch.cuda.is_available():
-    device = torch.device('cuda:{}'.format(args.gpu))
-else:
-    device = 'cpu'
-
-print('Use device: ', device)
-
-def initialize_env(name):
-    config = pyhocon.ConfigFactory.parse_file('experiments.conf')[name]
-    config['log_dir'] = os.path.join(config['log_root'], name)
-    if not os.path.exists(config['log_dir']):
-        os.makedirs(config['log_dir'])
-
-    return config
-
-def create_DAdata(config):
-    posts, cmnts, _, _, turn = create_traindata(config)
-    X_train, Y_train, X_valid, Y_valid, X_test, Y_test, Tturn, Vturn, Testturn = separate_data(posts, cmnts, turn)
-    return X_train, Y_train, X_valid, Y_valid, X_test, Y_test, Tturn, Vturn, Testturn
-
-def create_Uttdata(config):
-    _, _, posts, cmnts, turn = create_traindata(config)
-    X_train, Y_train, X_valid, Y_valid, X_test, Y_test, _, _, _ = separate_data(posts, cmnts, turn)
-    return X_train, Y_train, X_valid, Y_valid, X_test, Y_test
-
-def make_batchidx(X):
-    length = {}
-    for idx, conv in enumerate(X):
-        if len(conv) in length:
-            length[len(conv)].append(idx)
-        else:
-            length[len(conv)] = [idx]
-    return [v for k, v in sorted(length.items(), key=lambda x: x[0])]
 
 def train(experiment):
-    print('loading setting "{}"...'.format(experiment))
     config = initialize_env(experiment)
-    X_train, Y_train, X_valid, Y_valid, _, _, Tturn, Vturn, _ = create_DAdata(config)
+    XD_train, YD_train, XU_train, YU_train, turn_train = create_traindata(config=config, prefix='train')
+    XD_valid, YD_valid, XU_valid, YU_valid, turn_valid = create_traindata(config=config, prefix='valid')
     print('Finish create train data...')
-    da_vocab = da_Vocab(config, X_train + X_valid, Y_train + Y_valid)
-    if config['use_utt'] or config['use_uttcontext']:
-        XU_train, YU_train, XU_valid, YU_valid, _, _ = create_Uttdata(config)
-        utt_vocab = utt_Vocab(config, XU_train + XU_valid, YU_train + YU_valid)
+
+    if os.path.exists(os.path.join(config['log_root'], 'da_vocab.dict')):
+        da_vocab = da_Vocab(config, create_vocab=False)
+        utt_vocab = utt_Vocab(config, create_vocab=False)
     else:
-        utt_vocab = None
-    print('Finish create vocab dic...')
+        da_vocab = da_Vocab(config, das=[token for conv in XD_train + XD_valid + YD_train + YD_valid for token in conv])
+        utt_vocab = utt_Vocab(config,
+                              sentences=[sentence for conv in XU_train + XU_valid + YU_train + YU_valid for sentence in
+                                         conv])
+        da_vocab.save()
+        utt_vocab.save()
+    print('Utterance vocab.: {}'.format(len(utt_vocab.word2id)))
+    print('Dialog Act vocab.: {}'.format(len(da_vocab.word2id)))
 
-    # Tokenize sequences
-    # X_train, Tturn = preprocess(X_train, mode='X')
-    # X_valid, Vturn = preprocess(X_valid, mode='X')
-    # Y_train, _ = preprocess(Y_train, mode='Y')
-    # Y_valid, _ = preprocess(Y_valid, mode='Y')
-    X_train, Y_train = da_vocab.tokenize(X_train, Y_train)
-    X_valid, Y_valid = da_vocab.tokenize(X_valid, Y_valid)
-    if config['use_utt'] or config['use_uttcontext']:
-        # XU_train, _ = preprocess(XU_train, mode='X')
-        # XU_valid, _ = preprocess(XU_valid, mode='X')
-        XU_train, YU_train = utt_vocab.tokenize(XU_train, YU_train)
-        XU_valid, YU_valid = utt_vocab.tokenize(XU_valid, YU_valid)
-    else:
-        XU_train = []
-        YU_train = []
-        XU_valid = []
-        YU_valid = []
-
-
-    print('Finish preparing dataset...')
-
-    assert len(X_train) == len(Y_train), 'Unexpect content in train data'
-    assert len(X_valid) == len(Y_valid), 'Unexpect content in valid data'
-
+    # Tokenize
+    XD_train, YD_train = da_vocab.tokenize(XD_train), da_vocab.tokenize(YD_train)
+    XD_valid, YD_valid = da_vocab.tokenize(XD_valid), da_vocab.tokenize(YD_valid)
+    XU_train, YU_train = utt_vocab.tokenize(XU_train), utt_vocab.tokenize(YU_train)
+    XU_valid, YU_valid = utt_vocab.tokenize(XU_valid), utt_vocab.tokenize(YU_valid)
+    assert len(XD_train) == len(YD_train), 'Unexpect content in train data'
+    assert len(XD_valid) == len(YD_valid), 'Unexpect content in valid data'
     lr = config['lr']
     batch_size = config['BATCH_SIZE']
-    plot_losses = []
 
-    print_total_loss = 0
-    plot_total_loss = 0
-
-    da_encoder = None
-    da_context = None
-    if config['use_da']:
-        da_encoder = DAEncoder(da_input_size=len(da_vocab.word2id), da_embed_size=config['DA_EMBED'], da_hidden=config['DA_HIDDEN']).to(device)
-        da_context = DAContextEncoder(da_hidden=config['DA_HIDDEN']).to(device)
-        da_encoder_opt = optim.Adam(da_encoder.parameters(), lr=lr)
-        da_context_opt = optim.Adam(da_context.parameters(), lr=lr)
-
-    da_decoder = DADecoder(da_input_size=len(da_vocab.word2id), da_embed_size=config['DA_EMBED'], da_hidden=config['DEC_HIDDEN']).to(device)
-    da_decoder_opt = optim.Adam(da_decoder.parameters(), lr=lr)
-
-    utt_encoder = None
-    utt_context = None
-    utt_decoder = None
-    if config['use_utt'] or config['use_uttcontext']:
-        utt_encoder = UtteranceEncoder(utt_input_size=len(utt_vocab.word2id), embed_size=config['UTT_EMBED'], utterance_hidden=config['UTT_HIDDEN'], padding_idx=utt_vocab.word2id['<UttPAD>']).to(device)
-        utt_encoder_opt = optim.Adam(utt_encoder.parameters(), lr=lr)
-    if config['use_uttcontext']:
-        utt_context = UtteranceContextEncoder(utterance_hidden_size=config['UTT_CONTEXT']).to(device)
-        utt_context_opt = optim.Adam(utt_context.parameters(), lr=lr)
-
-    model = DApredictModel(device).to(device)
-    print('Success construct model...')
-
-
-    criterion = nn.CrossEntropyLoss()
-
-    print('---start training---')
-
+    predictor = DApredictModel(utt_vocab=utt_vocab, da_vocab=da_vocab, config=config)
+    model_opt = optim.Adam(predictor.parameters(), lr=lr)
     start = time.time()
-    k = 0
     _valid_loss = None
+    _train_loss = None
+    total_loss = 0
+    early_stop = 0
     for e in range(config['EPOCH']):
         tmp_time = time.time()
         print('Epoch {} start'.format(e+1))
-
-        # TODO: 同じターン数でバッチ生成
-        indexes = [i for i in range(len(X_train))]
+        indexes = [i for i in range(len(XD_train))]
         random.shuffle(indexes)
         k = 0
+        predictor.train()
         while k < len(indexes):
             # initialize
             step_size = min(batch_size, len(indexes) - k)
-
-            context_hidden = da_context.initHidden(step_size, device) if config['use_da'] else None
-            utt_context_hidden = utt_context.initHidden(step_size, device) if config['use_uttcontext'] else None
-            if config['use_da']:
-                da_context_opt.zero_grad()
-                da_encoder_opt.zero_grad()
-            da_decoder_opt.zero_grad()
-            if config['use_utt'] or config['use_uttcontext']:
-                utt_encoder_opt.zero_grad()
-            if config['use_uttcontext']:
-                utt_context_opt.zero_grad()
-
-            batch_idx = indexes[k : k + step_size]
-
-            #  create batch data
-            print('\rConversation {}/{} training...'.format(k + step_size, len(X_train)), end='')
-            X_seq = [X_train[seq_idx] for seq_idx in batch_idx]
-            Y_seq = [Y_train[seq_idx] for seq_idx in batch_idx]
-            turn_seq = [Tturn[seq_idx] for seq_idx in batch_idx]
-            max_conv_len = max(len(s) for s in X_seq)  # seq_len は DA と UTT で共通
-            if config['use_utt'] or config['use_uttcontext']:
-                XU_seq = [XU_train[seq_idx] for seq_idx in batch_idx]
-                YU_seq = [YU_train[seq_idx] for seq_idx in batch_idx]
-
-                # conversation turn padding
-                for ci in range(len(XU_seq)):
-                    XU_seq[ci] = XU_seq[ci] + [[utt_vocab.word2id['<ConvPAD>']]] * (max_conv_len - len(XU_seq[ci]))
-                    YU_seq[ci] = YU_seq[ci] + [[utt_vocab.word2id['<ConvPAD>']]] * (max_conv_len - len(YU_seq[ci]))
-            # X_seq  = (batch_size, max_conv_len)
-            # XU_seq = (batch_size, max_conv_len, seq_len)
-
-            # conversation turn padding
-            for ci in range(len(X_seq)):
-                X_seq[ci] = X_seq[ci] + [da_vocab.word2id['<PAD>']] * (max_conv_len - len(X_seq[ci]))
-                Y_seq[ci] = Y_seq[ci] + [da_vocab.word2id['<PAD>']] * (max_conv_len - len(Y_seq[ci]))
-                turn_seq[ci] = turn_seq[ci] + [0] * (max_conv_len - len(turn_seq[ci]))
-
-            assert len(X_seq) == len(Y_seq), 'Unexpect sequence length'
-
-
+            batch_idx = indexes[k: k + step_size]
+            model_opt.zero_grad()
+            # create batch data
+            print('\rConversation {}/{} training...'.format(k + step_size, len(XD_train)), end='')
+            XU_seq = [XU_train[seq_idx] for seq_idx in batch_idx]
+            XD_seq = [XD_train[seq_idx] for seq_idx in batch_idx]
+            YD_seq = [YD_train[seq_idx] for seq_idx in batch_idx]
+            turn_seq = [turn_train[seq_idx] for seq_idx in batch_idx]
+            max_conv_len = max(len(s) for s in XU_seq)
+            XU_tensor = []
+            XD_tensor = []
+            turn_tensor = []
             for i in range(0, max_conv_len):
-                X_tensor = torch.tensor([[X[i]] for X in X_seq]).to(device)
-                Y_tensor = torch.tensor([[Y[i]] for Y in Y_seq]).to(device)
-                if config['turn']:
-                    turn_tensor = torch.tensor([[t[i]] for t in turn_seq]).to(device)
-                else:
-                    turn_tensor = None
-                if config['use_utt'] or config['use_uttcontext']:
-                    max_seq_len = max(len(XU[i]) + 1 for XU in XU_seq)
-                    # utterance padding
-                    for ci in range(len(XU_seq)):
-                        XU_seq[ci][i] = XU_seq[ci][i] + [utt_vocab.word2id['<UttPAD>']] * (max_seq_len - len(XU_seq[ci][i]))
-                        YU_seq[ci][i] = YU_seq[ci][i] + [utt_vocab.word2id['<UttPAD>']] * (max_seq_len - len(YU_seq[ci][i]))
-                    XU_tensor = torch.tensor([XU[i] for XU in XU_seq]).to(device)
-                    # YU_tensor = torch.tensor([YU[i] for YU in YU_seq]).to(device)
-                    YU_tensor = None
-                    
-
-                else:
-                    XU_tensor, YU_tensor = None, None
-                # X_tensor = (batch_size, 1)
-                # XU_tensor = (batch_size, 1, seq_len)
-
-                last = True if i == max_conv_len - 1 else False
-    
-                if last:
-                    loss, context_hidden, utt_context_hidden = model.forward(X_da=X_tensor, Y_da=Y_tensor, X_utt=XU_tensor, Y_utt=YU_tensor,step_size=step_size, 
-                                                         turn=turn_tensor,
-                                                         da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
-                                                         da_context_hidden=context_hidden,
-                                                         utt_encoder=utt_encoder, utt_decoder=utt_decoder, utt_context=utt_context,
-                                                         utt_context_hidden=utt_context_hidden,
-                                                         criterion=criterion, last=last, config=config)
-                    print_total_loss += loss
-                    plot_total_loss += loss
-
-                    if config['use_da']:
-                        da_encoder_opt.step()
-                        da_context_opt.step()
-
-                    da_decoder_opt.step()
-
-                    if config['use_utt'] or config['use_uttcontext']:
-                        utt_encoder_opt.step()
-                    if config['use_uttcontext']:
-                        utt_context_opt.step()
-
-                else:
-                    context_hidden, utt_context_hidden = model.forward(X_da=X_tensor, Y_da=Y_tensor, X_utt=XU_tensor, Y_utt=YU_tensor, step_size=step_size, 
-                                                   turn=turn_tensor,
-                                                   da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
-                                                   da_context_hidden=context_hidden,
-                                                   utt_encoder=utt_encoder, utt_decoder=utt_decoder, utt_context=utt_context,
-                                                   utt_context_hidden=utt_context_hidden,
-                                                   criterion=criterion, last=last, config=config)
+                max_xseq_len = max(len(XU[i]) + 1 for XU in XU_seq)
+                # utterance padding
+                for ci in range(len(XU_seq)):
+                    XU_seq[ci][i] = XU_seq[ci][i] + [utt_vocab.word2id['<PAD>']] * (max_xseq_len - len(XU_seq[ci][i]))
+                XU_tensor.append(torch.tensor([XU[i] for XU in XU_seq]).cpu())
+                XD_tensor.append(torch.tensor([[XD[i]] for XD in XD_seq]).cpu())
+                turn_tensor.append(torch.tensor([[t[i]] for t in turn_seq]).cpu())
+            if config['DApred']['predict']:
+                XD_tensor = XD_tensor[:-1]
+                YD_tensor = torch.tensor([YD[-2] for YD in YD_seq]).cpu()
+            else:
+                YD_tensor = torch.tensor([YD[-1] for YD in YD_seq]).cpu()
+            loss, preds = predictor.forward(X_da=XD_tensor, Y_da=YD_tensor, X_utt=XU_tensor, turn=turn_tensor, step_size=step_size)
+            model_opt.step()
+            total_loss += loss
             k += step_size
         print()
-        valid_loss = validation(X_valid=X_valid, Y_valid=Y_valid, XU_valid=XU_valid, YU_valid=YU_valid, turn=Vturn,
-                                model=model, da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
-                                utt_encoder=utt_encoder, utt_context=utt_context, utt_decoder=utt_decoder, config=config)
+
+        valid_loss, valid_acc = validation(XD_valid=XD_valid, XU_valid=XU_valid, YD_valid=YD_valid, turn_valid=turn_valid,
+                                           model=predictor, utt_vocab=utt_vocab, config=config)
+
+        def save_model(filename):
+            torch.save(predictor.state_dict(), os.path.join(config['log_dir'], 'da_pred_state{}.model'.format(filename)))
 
         if _valid_loss is None:
-            if config['use_da']:
-                torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_beststate.model'))
-                torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_beststate.model'))
-            torch.save(da_decoder.state_dict(), os.path.join(config['log_dir'], 'dec_beststate.model'))
-            if config['use_utt'] or config['use_uttcontext']:
-                torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_beststate.model'))
-            if config['use_uttcontext']:
-                torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_beststate.model'))
+            save_model('validbest')
             _valid_loss = valid_loss
         else:
             if _valid_loss > valid_loss:
-                if config['use_da']:
-                    torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_beststate.model'))
-                    torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_beststate.model'))
-                torch.save(da_decoder.state_dict(), os.path.join(config['log_dir'], 'dec_beststate.model'))
-                if config['use_utt'] or config['use_uttcontext']:
-                    torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_beststate.model'))
-                if config['use_uttcontext']:
-                    torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_beststate.model'))
+                save_model('validbest')
                 _valid_loss = valid_loss
+                print('valid loss update, save model')
 
-
+        if _train_loss is None:
+            save_model('trainbest')
+            _train_loss = total_loss
+        else:
+            if _train_loss > total_loss:
+                save_model('trainbest')
+                _train_loss = total_loss
+                early_stop = 0
+                print('train loss update, save model')
+            else:
+                early_stop += 1
+                print('early stopping count | {}/{}'.format(early_stop, config['EARLY_STOP']))
+                if early_stop >= config['EARLY_STOP']:
+                    break
         if (e + 1) % config['LOGGING_FREQ'] == 0:
-            print_loss_avg = print_total_loss / config['LOGGING_FREQ']
-            print_total_loss = 0
-            print('steps %d\tloss %.4f\tvalid loss %.4f | exec time %.4f' % (e + 1, print_loss_avg, valid_loss, time.time() - tmp_time))
-            plot_loss_avg = plot_total_loss / config['LOGGING_FREQ']
-            plot_losses.append(plot_loss_avg)
-            plot_total_loss = 0
+            print_loss_avg = total_loss / config['LOGGING_FREQ']
+            total_loss = 0
+            print('steps %d\tloss %.4f\tvalid loss %.4f\tvalid acc %.4f | exec time %.4f' % (e + 1, print_loss_avg, valid_loss, valid_acc, time.time() - tmp_time))
 
         if (e + 1) % config['SAVE_MODEL'] == 0:
             print('saving model')
-            if config['use_da']:
-                torch.save(da_encoder.state_dict(), os.path.join(config['log_dir'], 'enc_state{}.model'.format(e + 1)))
-                torch.save(da_context.state_dict(), os.path.join(config['log_dir'], 'context_state{}.model'.format(e + 1)))
-            torch.save(da_decoder.state_dict(), os.path.join(config['log_dir'], 'dec_state{}.model'.format(e + 1)))
-            if config['use_utt'] or config['use_uttcontext']:
-                torch.save(utt_encoder.state_dict(), os.path.join(config['log_dir'], 'utt_enc_state{}.model'.format(e + 1)))
-            if config['use_uttcontext']:
-                torch.save(utt_context.state_dict(), os.path.join(config['log_dir'], 'utt_context_state{}.model'.format(e + 1)))
-
-
+            save_model(e+1)
     print()
     print('Finish training | exec time: %.4f [sec]' % (time.time() - start))
 
-def validation(X_valid, Y_valid, XU_valid, YU_valid, model, turn,
-               da_encoder, da_decoder, da_context,
-               utt_encoder, utt_context, utt_decoder, config):
 
-    da_context_hidden = da_context.initHidden(1, device) if config['use_da'] else None
-    utt_context_hidden = utt_context.initHidden(1, device) if config['use_uttcontext'] else None
-    criterion = nn.CrossEntropyLoss()
+def validation(XD_valid, XU_valid, YD_valid, turn_valid, model, utt_vocab, config):
+    model.eval()
     total_loss = 0
     k = 0
-
-    for seq_idx in range(len(X_valid)):
-        X_seq = X_valid[seq_idx]
-        Y_seq = Y_valid[seq_idx]
-        turn_seq = turn[seq_idx]
-        if config['use_utt'] or config['use_uttcontext']:
-            XU_seq = XU_valid[seq_idx]
-            YU_seq = YU_valid[seq_idx]
-
-        assert len(X_seq) == len(Y_seq), 'Unexpect sequence len in evaluate {} != {}'.format(len(X_seq), len(Y_seq))
-
-        for i in range(0, len(X_seq)):
-            X_tensor = torch.tensor([[X_seq[i]]]).to(device)
-            Y_tensor = torch.tensor([[Y_seq[i]]]).to(device)
-            if config['turn']:
-                turn_tensor = torch.tensor([[turn_seq[i]]]).to(device)
-            else:
-                turn_tensor = None
-            if config['use_utt'] or config['use_uttcontext']:
-                XU_tensor = torch.tensor([XU_seq[i]]).to(device)
-                YU_tensor = torch.tensor([YU_seq[i]]).to(device)
-            else:
-                XU_tensor, YU_tensor = None, None
-
-            loss, context_hidden, utt_context_hidden = model.evaluate(X_da=X_tensor, Y_da=Y_tensor, X_utt=XU_tensor, Y_utt=YU_tensor,
-                                                  turn=turn_tensor,
-                                                  da_encoder=da_encoder, da_decoder=da_decoder, da_context=da_context,
-                                                  da_context_hidden=da_context_hidden,
-                                                  utt_encoder=utt_encoder, utt_decoder=utt_decoder, utt_context=utt_context,
-                                                  utt_context_hidden=utt_context_hidden,
-                                                  criterion=criterion, config=config)
-            total_loss += loss
-    return total_loss
+    batch_size = config['BATCH_SIZE']
+    indexes = [i for i in range(len(XU_valid))]
+    acc = []
+    while k < len(indexes):
+        step_size = min(batch_size, len(indexes) - k)
+        batch_idx = indexes[k: k + step_size]
+        XU_seq = [XU_valid[seq_idx] for seq_idx in batch_idx]
+        XD_seq = [XD_valid[seq_idx] for seq_idx in batch_idx]
+        YD_seq = [YD_valid[seq_idx] for seq_idx in batch_idx]
+        turn_seq = [turn_valid[seq_idx] for seq_idx in batch_idx]
+        max_conv_len = max(len(s) for s in XU_seq)
+        XU_tensor = []
+        XD_tensor = []
+        turn_tensor = []
+        for i in range(0, max_conv_len):
+            max_xseq_len = max(len(XU[i]) + 1 for XU in XU_seq)
+            for ci in range(len(XU_seq)):
+                XU_seq[ci][i] = XU_seq[ci][i] + [utt_vocab.word2id['<PAD>']] * (max_xseq_len - len(XU_seq[ci][i]))
+            XU_tensor.append(torch.tensor([x[i] for x in XU_seq]).cpu())
+            XD_tensor.append(torch.tensor([[x[i]] for x in XD_seq]).cpu())
+            turn_tensor.append(torch.tensor([[t[i]] for t in turn_seq]).cpu())
+        if config['DApred']['predict']:
+            XD_tensor = XD_tensor[:-1]
+            YD_tensor = torch.tensor([YD[-2] for YD in YD_seq]).cpu()
+        else:
+            YD_tensor = torch.tensor([YD[-1] for YD in YD_seq]).cpu()
+        loss, preds = model(X_da=XD_tensor, Y_da=YD_tensor, X_utt=XU_tensor, turn=turn_tensor, step_size=step_size)
+        preds = np.argmax(preds, axis=1)
+        acc.append(accuracy_score(y_pred=preds, y_true=YD_tensor.data.tolist()))
+        total_loss += loss
+        k += step_size
+    return total_loss, np.mean(acc)
 
 if __name__ == '__main__':
+    args = parse()
     train(args.expr)
