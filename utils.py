@@ -10,17 +10,36 @@ EOS_token = '<EOS>'
 BOS_token = '<BOS>'
 parallel_pattern = re.compile(r'^(.+?)(\t)(.+?)$')
 
-damsl_align = {'<Uninterpretable>': ['%', 'x'],
-               '<Statement>': ['sd', 'sv', '^2', 'no', 't3', 't1', 'oo', 'cc', 'co', 'oo_co_cc'],
-               '<Question>': ['q', 'qy', 'qw', 'qy^d', 'bh', 'qo', 'qh', 'br', 'qrr', '^g', 'qw^d'],
-               '<Directive>': ['ad'],
-               '<Propose>': ['p'],
-               '<Greeting>': ['fp', 'fc'],
-               '<Apology>': ['fa', 'nn', 'ar', 'ng', 'nn^e', 'arp', 'nd', 'arp_nd'],
-               '<Agreement>': ['aa', 'aap', 'am', 'aap_am', 'ft'],
-               '<Understanding>': ['b', 'bf', 'ba', 'bk', 'na', 'ny', 'ny^e'],
-               '<Other>': ['o', 'fo', 'bc', 'by', 'fw', 'h', '^q', 'b^m', '^h', 'bd', 'fo_o_fw_"_by_bc'],
-               '<turn>': ['<turn>']}
+# swbd_align = {
+#     '<Uninterpretable>': ['%', 'x'],
+#     '<Statement>': ['sd', 'sv', '^2', 'no', 't3', 't1', 'oo', 'cc', 'co', 'oo_co_cc'],
+#     '<Question>': ['q', 'qy', 'qw', 'qy^d', 'bh', 'qo', 'qh', 'br', 'qrr', '^g', 'qw^d'],
+#     '<Directive>': ['ad'],
+#     '<Propose>': ['p'],
+#     '<Greeting>': ['fp', 'fc'],
+#     '<Apology>': ['fa', 'nn', 'ar', 'ng', 'nn^e', 'arp', 'nd', 'arp_nd'],
+#     '<Agreement>': ['aa', 'aap', 'am', 'aap_am', 'ft'],
+#     '<Understanding>': ['b', 'bf', 'ba', 'bk', 'na', 'ny', 'ny^e'],
+#     '<Other>': ['o', 'fo', 'bc', 'by', 'fw', 'h', '^q', 'b^m', '^h', 'bd', 'fo_o_fw_"_by_bc'],
+#     '<turn>': ['<turn>']
+# }
+
+damsl_align = {
+    '<Uninterpretable>': ['abandoned_or_turn-exit/uninterpretable', 'non-verbal'],
+    '<Statement>': ['statement-non-opinion', 'statement-opinion', 'collaborative_completion', 
+        'other_answers', '3rd-party-talk', 'self-talk'],
+    '<Question>': ['yes-no-question', 'wh-question', 'declarative_yes-no-question', 'backchannel_in_question_form',
+        'open-question', 'rhetorical-questions', 'signal-non-understanding', 'or-clause', 'tag-question', 'declarative_wh-question'],
+    '<Directive>': ['action-directive'],
+    '<Propose>': ['offers,_options_commits'],
+    '<Greeting>': ['conventional-opening', 'conventional-closing'],
+    '<Apology>': ['apology', 'no_answers', 'reject', 'negative_non-no_answers', 'dispreferred_answers'],
+    '<Agreement>': ['agree/accept', 'maybe/accept-part', 'thanking'],
+    '<Understanding>': ['acknowledge_(backchannel)', 'summarize/reformulate', 'appreciation',
+        'response_acknowledgement', 'affirmative_non-yes_answers', 'yes_answers'],
+    '<Other>': ['other', 'quotation', 'repeat-phrase', 'hedge', 'hold_before_answer/agreement', 'downplayer'],
+    '<turn>': ['<turn>']
+}
 
 def parse():
     parser = argparse.ArgumentParser()
